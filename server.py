@@ -481,13 +481,15 @@ def _autopoll_start_codex_exec_if_inactive(
     startup_check_seconds: float,
     log_dir: Path,
     stale_seconds: float,
+    force_start: bool = False,
 ) -> None:
     request_id = f"auto{uuid.uuid4().hex[:8]}"
     LOGGER.info(
-        "codex.exec.autopoll.tick request_id=%s workspace=%s stale_seconds=%.2f",
+        "codex.exec.autopoll.tick request_id=%s workspace=%s stale_seconds=%.2f force_start=%s",
         request_id,
         workspace,
         stale_seconds,
+        force_start,
     )
 
     if not prompt.strip():
@@ -517,7 +519,7 @@ def _autopoll_start_codex_exec_if_inactive(
             )
         else:
             inactivity_seconds = max(0.0, time.time() - latest_log_mtime)
-            if inactivity_seconds < stale_seconds:
+            if not force_start and inactivity_seconds < stale_seconds:
                 LOGGER.info(
                     "codex.exec.autopoll.skip request_id=%s reason=recent_log_activity inactivity_seconds=%.2f stale_seconds=%.2f",
                     request_id,
@@ -525,6 +527,13 @@ def _autopoll_start_codex_exec_if_inactive(
                     stale_seconds,
                 )
                 return
+            if force_start and inactivity_seconds < stale_seconds:
+                LOGGER.info(
+                    "codex.exec.autopoll.force_start request_id=%s inactivity_seconds=%.2f stale_seconds=%.2f",
+                    request_id,
+                    inactivity_seconds,
+                    stale_seconds,
+                )
             LOGGER.info(
                 "codex.exec.autopoll.inactive request_id=%s inactivity_seconds=%.2f stale_seconds=%.2f",
                 request_id,
@@ -559,13 +568,14 @@ def _autopoll_loop(
     poll_interval_seconds: float,
 ) -> None:
     LOGGER.info(
-        "codex.exec.autopoll.loop.start workspace=%s poll_interval_seconds=%.2f codex_exec_binary=%s stale_seconds=%.2f log_dir=%s",
+        "codex.exec.autopoll.loop.start workspace=%s poll_interval_seconds=%.2f codex_exec_binary=%s stale_seconds=%.2f log_dir=%s force_start_on_first_tick=true",
         workspace,
         poll_interval_seconds,
         codex_exec_binary,
         stale_seconds,
         log_dir,
     )
+    is_first_tick = True
     while not AUTO_POLL_STOP_EVENT.is_set():
         _autopoll_start_codex_exec_if_inactive(
             workspace=workspace,
@@ -575,7 +585,9 @@ def _autopoll_loop(
             startup_check_seconds=startup_check_seconds,
             log_dir=log_dir,
             stale_seconds=stale_seconds,
+            force_start=is_first_tick,
         )
+        is_first_tick = False
         if AUTO_POLL_STOP_EVENT.wait(poll_interval_seconds):
             break
     LOGGER.info("codex.exec.autopoll.loop.stop")
