@@ -509,7 +509,13 @@ def _autopoll_start_codex_exec_if_inactive(
             return
 
         latest_log_mtime = _latest_codex_exec_log_mtime(log_dir)
-        if latest_log_mtime is not None:
+        if latest_log_mtime is None:
+            LOGGER.info(
+                "codex.exec.autopoll.inactive request_id=%s reason=no_codex_exec_logs stale_seconds=%.2f",
+                request_id,
+                stale_seconds,
+            )
+        else:
             inactivity_seconds = max(0.0, time.time() - latest_log_mtime)
             if inactivity_seconds < stale_seconds:
                 LOGGER.info(
@@ -523,12 +529,6 @@ def _autopoll_start_codex_exec_if_inactive(
                 "codex.exec.autopoll.inactive request_id=%s inactivity_seconds=%.2f stale_seconds=%.2f",
                 request_id,
                 inactivity_seconds,
-                stale_seconds,
-            )
-        else:
-            LOGGER.info(
-                "codex.exec.autopoll.inactive request_id=%s reason=no_codex_exec_logs stale_seconds=%.2f",
-                request_id,
                 stale_seconds,
             )
 
