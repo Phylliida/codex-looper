@@ -18,7 +18,7 @@ Looper is an orchestration layer around `codex exec`, not a scheduler with queue
 - Broadcasting run starts to Zulip (stream or private messages).
 - Re-running Codex with the same task prompt over and over.
 
-Looper also has optional idle auto-start polling so it can keep work running in the background.
+Looper also has optional idle polling that can auto-start a fresh `codex exec` run after log inactivity.
 
 ## Intended Workflow (Repeat The Same Prompt)
 
@@ -271,8 +271,9 @@ ls -1t logs/codex-exec-*.log | head
 - `CODEX_EXEC_DELAY_SECONDS`: default spawn delay (`1` default).
 - `CODEX_EXEC_STARTUP_CHECK_SECONDS`: startup check wait (`1` default).
 - `CODEX_EXEC_LOG_DIR`: directory for per-run logs (`<looper-dir>/logs` default).
-- `LOOPER_AUTO_START_WHEN_IDLE`: enable idle polling (`1` default; disable with `0`, `false`, `no`, `off`).
+- `LOOPER_AUTO_START_WHEN_IDLE`: enable idle polling/auto-start (`1` default; disable with `0`, `false`, `no`, `off`).
 - `LOOPER_IDLE_POLL_SECONDS`: polling interval in seconds (`300` default).
+- `LOOPER_IDLE_LOG_STALE_SECONDS`: required inactivity window for `codex-exec-*.log` mtime before autopoll starts a run (`600` default = 10 minutes).
 
 Codex binary resolution order:
 
@@ -309,16 +310,19 @@ Dry-run credential check:
 node send-zulip-dm.js --dry-run
 ```
 
-## Autopoll (Optional Background Mode)
+## Autopoll (Optional Background Auto-Start Mode)
 
 If `LOOPER_AUTO_START_WHEN_IDLE=1`, a background thread runs every `LOOPER_IDLE_POLL_SECONDS`:
 
 1. If `/run` is currently executing, skip this tick.
 2. If any live `codex exec` process exists, skip this tick.
-3. Otherwise, start a new `codex exec` using default workspace and default prompt.
+3. If `codex-exec-*.log` has been modified within the last `LOOPER_IDLE_LOG_STALE_SECONDS`, skip this tick.
+4. Otherwise, start a new `codex exec` using default workspace and default prompt.
+
+Autopoll uses log-file inactivity as a safety gate to reduce duplicate starts when process detection is noisy.
+If no `codex-exec-*.log` files exist yet, autopoll treats that as inactive and is allowed to start.
 
 Autopoll request IDs are prefixed with `auto` (for example `auto5f9ed4b2`).
-Because autopoll reuses the same default prompt each cycle, it naturally follows the "repeat the same instructions against a persistent TODO file" workflow.
 
 ## Shutdown Behavior
 

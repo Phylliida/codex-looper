@@ -39,6 +39,7 @@ DEFAULT_AUTO_START_WHEN_IDLE = os.getenv("LOOPER_AUTO_START_WHEN_IDLE", "1").str
     "on",
 }
 DEFAULT_IDLE_POLL_SECONDS = float(os.getenv("LOOPER_IDLE_POLL_SECONDS", "300"))
+DEFAULT_IDLE_LOG_STALE_SECONDS = float(os.getenv("LOOPER_IDLE_LOG_STALE_SECONDS", "600"))
 DEFAULT_SERVER_LOG_PATH = Path(
     os.getenv("LOOPER_SERVER_LOG_PATH", str(DEFAULT_CODEX_EXEC_LOG_DIR / "looper-server.log"))
 )
@@ -454,19 +455,39 @@ def _start_codex_exec(
     return result
 
 
-def _auto_start_codex_exec_if_idle(
+def _latest_codex_exec_log_mtime(log_dir: Path) -> float | None:
+    latest_mtime: float | None = None
+    try:
+        candidates = sorted(log_dir.glob("codex-exec-*.log"))
+    except OSError as exc:
+        LOGGER.warning("codex.exec.autopoll.logs_scan_failed log_dir=%s error=%s", log_dir, exc)
+        return None
+
+    for path in candidates:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if latest_mtime is None or mtime > latest_mtime:
+            latest_mtime = mtime
+    return latest_mtime
+
+
+def _autopoll_start_codex_exec_if_inactive(
     workspace: str,
     prompt: str,
     codex_exec_binary: str,
     exec_delay_seconds: float,
     startup_check_seconds: float,
+    log_dir: Path,
+    stale_seconds: float,
 ) -> None:
     request_id = f"auto{uuid.uuid4().hex[:8]}"
     LOGGER.info(
-        "codex.exec.autopoll.tick request_id=%s workspace=%s prompt_len=%d",
+        "codex.exec.autopoll.tick request_id=%s workspace=%s stale_seconds=%.2f",
         request_id,
         workspace,
-        len(prompt),
+        stale_seconds,
     )
 
     if not prompt.strip():
@@ -486,6 +507,30 @@ def _auto_start_codex_exec_if_idle(
                 alive_pids,
             )
             return
+
+        latest_log_mtime = _latest_codex_exec_log_mtime(log_dir)
+        if latest_log_mtime is not None:
+            inactivity_seconds = max(0.0, time.time() - latest_log_mtime)
+            if inactivity_seconds < stale_seconds:
+                LOGGER.info(
+                    "codex.exec.autopoll.skip request_id=%s reason=recent_log_activity inactivity_seconds=%.2f stale_seconds=%.2f",
+                    request_id,
+                    inactivity_seconds,
+                    stale_seconds,
+                )
+                return
+            LOGGER.info(
+                "codex.exec.autopoll.inactive request_id=%s inactivity_seconds=%.2f stale_seconds=%.2f",
+                request_id,
+                inactivity_seconds,
+                stale_seconds,
+            )
+        else:
+            LOGGER.info(
+                "codex.exec.autopoll.inactive request_id=%s reason=no_codex_exec_logs stale_seconds=%.2f",
+                request_id,
+                stale_seconds,
+            )
 
         LOGGER.info("codex.exec.autopoll.start request_id=%s", request_id)
         result = _start_codex_exec(
@@ -509,21 +554,27 @@ def _autopoll_loop(
     codex_exec_binary: str,
     exec_delay_seconds: float,
     startup_check_seconds: float,
+    log_dir: Path,
+    stale_seconds: float,
     poll_interval_seconds: float,
 ) -> None:
     LOGGER.info(
-        "codex.exec.autopoll.loop.start workspace=%s poll_interval_seconds=%.2f codex_exec_binary=%s",
+        "codex.exec.autopoll.loop.start workspace=%s poll_interval_seconds=%.2f codex_exec_binary=%s stale_seconds=%.2f log_dir=%s",
         workspace,
         poll_interval_seconds,
         codex_exec_binary,
+        stale_seconds,
+        log_dir,
     )
     while not AUTO_POLL_STOP_EVENT.is_set():
-        _auto_start_codex_exec_if_idle(
+        _autopoll_start_codex_exec_if_inactive(
             workspace=workspace,
             prompt=prompt,
             codex_exec_binary=codex_exec_binary,
             exec_delay_seconds=exec_delay_seconds,
             startup_check_seconds=startup_check_seconds,
+            log_dir=log_dir,
+            stale_seconds=stale_seconds,
         )
         if AUTO_POLL_STOP_EVENT.wait(poll_interval_seconds):
             break
@@ -738,12 +789,19 @@ if __name__ == "__main__":
     host = os.getenv("LOOPER_HOST", "0.0.0.0")
     port = int(os.getenv("LOOPER_PORT", "3456"))
     idle_poll_seconds = DEFAULT_IDLE_POLL_SECONDS
+    idle_log_stale_seconds = DEFAULT_IDLE_LOG_STALE_SECONDS
     if idle_poll_seconds <= 0:
         LOGGER.warning(
             "codex.exec.autopoll.invalid_interval value=%.2f fallback=300.00",
             idle_poll_seconds,
         )
         idle_poll_seconds = 300.0
+    if idle_log_stale_seconds <= 0:
+        LOGGER.warning(
+            "codex.exec.autopoll.invalid_stale_seconds value=%.2f fallback=600.00",
+            idle_log_stale_seconds,
+        )
+        idle_log_stale_seconds = 600.0
 
     autopoll_thread: threading.Thread | None = None
     if DEFAULT_AUTO_START_WHEN_IDLE:
@@ -756,6 +814,8 @@ if __name__ == "__main__":
                 autopoll_codex_exec_binary,
                 DEFAULT_CODEX_EXEC_DELAY_SECONDS,
                 DEFAULT_CODEX_EXEC_STARTUP_CHECK_SECONDS,
+                DEFAULT_CODEX_EXEC_LOG_DIR,
+                idle_log_stale_seconds,
                 idle_poll_seconds,
             ),
             daemon=True,
@@ -763,18 +823,20 @@ if __name__ == "__main__":
         )
         autopoll_thread.start()
         LOGGER.info(
-            "codex.exec.autopoll.enabled interval_seconds=%.2f workspace=%s codex_exec_binary=%s codex_exec_binary_source=%s",
+            "codex.exec.autopoll.enabled interval_seconds=%.2f workspace=%s codex_exec_binary=%s codex_exec_binary_source=%s stale_seconds=%.2f log_dir=%s",
             idle_poll_seconds,
             DEFAULT_WORKSPACE,
             autopoll_codex_exec_binary,
             autopoll_binary_source,
+            idle_log_stale_seconds,
+            DEFAULT_CODEX_EXEC_LOG_DIR,
         )
     else:
         LOGGER.info("codex.exec.autopoll.disabled")
 
     atexit.register(lambda: _stop_active_codex_exec_processes("atexit"))
     LOGGER.info(
-        "server.start host=%s port=%d log_level=%s workspace=%s zulip_script=%s server_log_path=%s codex_exec_log_dir=%s autopoll_enabled=%s autopoll_interval_seconds=%.2f",
+        "server.start host=%s port=%d log_level=%s workspace=%s zulip_script=%s server_log_path=%s codex_exec_log_dir=%s autopoll_enabled=%s autopoll_interval_seconds=%.2f autopoll_stale_seconds=%.2f",
         host,
         port,
         DEFAULT_LOG_LEVEL,
@@ -784,6 +846,7 @@ if __name__ == "__main__":
         DEFAULT_CODEX_EXEC_LOG_DIR,
         DEFAULT_AUTO_START_WHEN_IDLE,
         idle_poll_seconds,
+        idle_log_stale_seconds,
     )
     try:
         app.run(host=host, port=port)
