@@ -16,8 +16,30 @@ Looper is an orchestration layer around `codex exec`, not a scheduler with queue
 - Keeping at most one active Codex task at a time.
 - Auditing run lifecycle and command output in local log files.
 - Broadcasting run starts to Zulip (stream or private messages).
+- Re-running Codex with the same task prompt over and over.
 
 Looper also has optional idle auto-start polling so it can keep work running in the background.
+
+## Intended Workflow (Repeat The Same Prompt)
+
+The main Looper pattern is to repeatedly run **the same prompt text**. This is intentional: in practice, Codex often performs best on a fresh first-pass run, so Looper resets state and re-launches with the same instructions each time.
+
+To make repeated runs converge instead of drift, keep a persistent task list in the target repo and include its path directly in the prompt.
+
+Recommended prompt shape:
+
+1. Point Codex to one canonical TODO/burndown file.
+2. Tell it to pick next unfinished item(s) from that file.
+3. Require it to update that same file with progress, failures, and next steps before finishing.
+4. Repeat with the same prompt on the next Looper run.
+
+Example prompt snippet:
+
+```text
+Work from crates/vcad-topology/docs/phase5-geometric-topology-consistency.md.
+Pick the next incomplete task, implement and verify it, then update that same file
+with what you changed, what failed, and what remains.
+```
 
 ## How A Run Works
 
@@ -46,6 +68,63 @@ Concurrency guard:
 Python dependencies:
 
 - `Flask==3.1.0` (see `requirements.txt`).
+
+## Codex Subrepo Setup And Build
+
+Looper will try these local `codex` binaries before falling back to `PATH`:
+
+1. `./codex/codex`
+2. `./codex/codex-rs/target/release/codex`
+3. `./codex/codex-rs/target/debug/codex`
+
+If you want Looper to use a local source checkout, set up `codex` in `<looper-dir>/codex`.
+
+### Option A: clone as a plain nested repo
+
+```bash
+cd /home/bepis/Documents/looper
+git clone https://github.com/openai/codex.git codex
+```
+
+### Option B: track codex as a git submodule (recommended for pinned revisions)
+
+```bash
+cd /home/bepis/Documents/looper
+git submodule add https://github.com/openai/codex.git codex
+git submodule update --init --recursive
+```
+
+After cloning this repo elsewhere, initialize submodules with:
+
+```bash
+git submodule update --init --recursive
+```
+
+### Build codex from source
+
+Build from the Rust workspace (`codex/codex-rs`):
+
+```bash
+cd /home/bepis/Documents/looper/codex/codex-rs
+
+# Install Rust if needed:
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+
+# Build optimized binary:
+cargo build --release
+```
+
+Binary output:
+
+- Release: `/home/bepis/Documents/looper/codex/codex-rs/target/release/codex`
+- Debug: `/home/bepis/Documents/looper/codex/codex-rs/target/debug/codex`
+
+You can let Looper auto-detect these paths, or set:
+
+```bash
+export CODEX_EXEC_BINARY=/home/bepis/Documents/looper/codex/codex-rs/target/release/codex
+```
 
 ## Quick Start
 
@@ -85,7 +164,7 @@ Response:
 Request JSON fields:
 
 - `zulip_message` (required): message sent before any process management.
-- `codex_prompt` (optional): prompt to execute. If omitted, Looper uses built-in default prompt.
+- `codex_prompt` (optional): prompt to execute. If omitted, Looper uses a built-in default prompt that points Codex at a specific burndown/TODO document.
 - `prompt` (optional legacy alias): used when `codex_prompt` is absent.
 - `workspace` (optional): working directory passed to `codex exec -C`.
 - `codex_exec_binary` (optional): absolute/relative path or executable name override.
@@ -98,6 +177,7 @@ Special behavior:
 - To send only Zulip and skip launching Codex, set `"codex_prompt": ""`.
 - If `workspace` is omitted, Looper uses `/home/bepis/Documents/verifycad/VerusCAD/`.
 - If `zulip_script_path` is omitted, Looper uses `<looper-dir>/send-zulip-dm.js`.
+- Best results usually come from reusing the same `codex_prompt` across runs and having that prompt reference a persistent TODO file path.
 
 Legacy delay compatibility:
 
@@ -238,6 +318,7 @@ If `LOOPER_AUTO_START_WHEN_IDLE=1`, a background thread runs every `LOOPER_IDLE_
 3. Otherwise, start a new `codex exec` using default workspace and default prompt.
 
 Autopoll request IDs are prefixed with `auto` (for example `auto5f9ed4b2`).
+Because autopoll reuses the same default prompt each cycle, it naturally follows the "repeat the same instructions against a persistent TODO file" workflow.
 
 ## Shutdown Behavior
 
